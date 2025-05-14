@@ -126,16 +126,19 @@ pip install -r requirements
 
 ## Deployment Strategies to Gcloud:
 1.Dockerise
-   a.There are 2 DockerFiles in the frontend(Streamlit) and api(FASTAPI) folders.
-   b.After installing Docker Desktop,create the docker images using the following commands
-   create the fast api docker image
-   before that run the following commands to authorize Google Cloud SDK.And make sure you run these command in the root directory of the project.
+- There are 2 DockerFiles in the frontend(Streamlit) and api(FASTAPI) folders.
+- After installing Docker Desktop,create the docker images using the following commands
+- create the fast api docker image
+- before that run the following commands to authorize Google Cloud SDK.And make sure you run these command in the root directory of the project.
    
 ## Contributing
 
 Contributions are welcome! Please open an issue or submit a pull request for any improvements or bug fixes.
 
 ---
+## Documenation and the Demo Link:
+- The codelab documentation for this project is here: https://codelabs-preview.appspot.com/?file_id=1m6pFHqqgA2N7T0qmKOny6_1tmpuYuv3RM9xa7Q9_UwU/edit?tab=t.0#4
+- The demo link for this project is here : https://northeastern-my.sharepoint.com/personal/mate_r_northeastern_edu/_layouts/15/stream.aspx?id=%2Fpersonal%2Fmate%5Fr%5Fnortheastern%5Fedu%2FDocuments%2FRecordings%2FBIG%5FDATA%5FSCRUM%2D20250206%5F121750%2DMeeting%20Recording%2Emp4&referrer=StreamWebApp%2EWeb&referrerScenario=AddressBarCopied%2Eview%2E7ef65eea%2D3e3e%2D4fab%2D8cd6%2D9465cf24018a
 
 ## License
 
