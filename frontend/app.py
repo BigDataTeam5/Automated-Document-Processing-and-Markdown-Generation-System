@@ -1,7 +1,7 @@
 import streamlit as st
 import requests
 import time
-
+import toml
 # Streamlit UI
 st.set_page_config(page_title="📄 PDF Processing & Markdown Viewer", layout="wide")
 # Initialize session state variables if they do not exist
@@ -17,11 +17,11 @@ if "show_url_input" not in st.session_state:
     st.session_state.show_url_input = False
 # Initialize session state for markdown history
 if "markdown_history" not in st.session_state:
-    st.session_state.markdown_history = []  # To store history of markdown files
+    st.session_state.markdown_history = []
 
-# FastAPI Base URL (Update this with the correct deployed FastAPI URL)
-FASTAPI_URL = "https://fastapi-app-974490277552.us-central1.run.app"
-# API Endpoints
+with open("config.toml", "r") as f:
+    config = toml.load(f)
+    FASTAPI_URL = config["fastapi"]["url"]   
 UPLOAD_PDF_API = f"{FASTAPI_URL}/upload-pdf"
 LATEST_FILE_API = f"{FASTAPI_URL}/get-latest-file-url"
 PARSE_PDF_API = f"{FASTAPI_URL}/parse-pdf"
@@ -38,6 +38,8 @@ url_input = None  # Define url_input globally
 
 # Sidebar UI
 with st.sidebar:
+    if st.button("🔁 Reset"):
+        st.session_state.clear()
     st.subheader("Select Options")
 
     # Dropdown for processing type
@@ -59,6 +61,8 @@ with st.sidebar:
     for markdown in st.session_state.markdown_history:
         if st.button(markdown["label"]):
             st.session_state.selected_markdown = markdown["content"]  # Set the selected markdown content
+    
+    
 
 # Function to Upload File to S3
 def upload_pdf(file):
@@ -76,7 +80,7 @@ def upload_pdf(file):
 
 def process_open_source_pdf():
     with st.spinner("⏳ Processing Open Source PDF... Please wait."):
-        progress_bar = st.progress(0)  # Initialize progress bar
+        progress_bar = st.progress(0)  
         try:
             for i in range(10):  # Simulate progress while waiting
                 time.sleep(1)
@@ -451,7 +455,7 @@ if st.session_state.get("next_clicked", False):
                     # ✅ Add a Download Button for the Markdown File
                     st.download_button(
                         label="⬇️ Download Web Markdown",
-                        data=requests.get(markdown_file_url).text,  # Fetch file content
+                        data=requests.get(markdown_file_url).text,  
                         file_name="web_markdown.md",
                         mime="text/markdown"
                     )

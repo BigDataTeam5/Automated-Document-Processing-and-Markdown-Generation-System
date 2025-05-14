@@ -29,7 +29,7 @@ from docklingextraction import main
 #  Call the Docling conversion function
 # Load environment variables from .env file
 import tempfile
-load_dotenv()
+load_dotenv(override=True)
 
 # AWS S3 Configuration
 S3_BUCKET = os.getenv("AWS_BUCKET_NAME")
@@ -214,9 +214,7 @@ async def get_latest_file_url() -> Dict[str, str]:
 
 @app.get("/parse-pdf")
 async def parse_uploaded_pdf():
-    """
-    Uses the saved latest file details to extract content and upload results to S3.
-    """
+    
     try:
         # Check if the latest file details are available
         if not latest_file_details:
@@ -270,7 +268,105 @@ async def parse_uploaded_pdf_azure():
 
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Azure PDF Processing failed: {str(e)}")
+
+@app.get("/list-pdf-contents")
+async def list_pdf_contents():
+    """
+    Lists all the contents and files generated from the most recent PDF processing.
+    Returns information about parsed text, images, tables, and markdown files.
+    """
+    import datetime
+    try:
+        if not latest_file_details:
+            raise HTTPException(status_code=404, detail="No PDF has been processed yet. Please upload and parse a PDF first.")
+
+        filename = latest_file_details.get("filename")
+        if not filename:
+            raise HTTPException(status_code=404, detail="Incomplete file details. Please upload a PDF again.")
+
+        # Get the file name without extension to use as a prefix
+        file_prefix = os.path.splitext(filename)[0]
+        
+        # Define the S3 paths where different content types would be stored
+        paths = {
+            "raw_pdf": f"RawInputs/{filename}",
+            "os_parsed_data": f"pdf_processing_pipeline/pdf_os_pipeline/parsed_data/",
+            "azure_parsed_data": f"pdf_processing_pipeline/pdf_enterprise_pipeline/",
+            "markdown_outputs": f"pdf_processing_pipeline/markdown_outputs/"
+        }
+        
+        # Results dictionary to store all the found content
+        results = {
+            "pdf_file": latest_file_details.get("file_url"),
+            "text_files": [],
+            "image_files": [],
+            "table_files": [],
+            "markdown_files": [],
+            "other_files": []
+        }
+        
+        # Check each path for relevant content
+        for path_type, s3_path in paths.items():
+            try:
+                # List objects with this prefix
+                response = s3_client.list_objects_v2(
+                    Bucket=S3_BUCKET, 
+                    Prefix=s3_path
+                )
+                
+                if "Contents" in response:
+                    for item in response["Contents"]:
+                        key = item["Key"]
+                        
+                        # Generate a presigned URL for viewing
+                        url = s3_client.generate_presigned_url(
+                            'get_object',
+                            Params={'Bucket': S3_BUCKET, 'Key': key},
+                            ExpiresIn=3600  # 1 hour validity
+                        )
+                        
+                        # Categorize the file based on extension or path
+                        file_info = {
+                            "filename": key.split("/")[-1],
+                            "path": key,
+                            "url": url,
+                            "size": item["Size"],
+                            "last_modified": item["LastModified"].isoformat()
+                        }
+                        
+                        if key.endswith('.txt'):
+                            results["text_files"].append(file_info)
+                        elif key.endswith(('.png', '.jpg', '.jpeg', '.gif')):
+                            results["image_files"].append(file_info)
+                        elif key.endswith(('.csv', '.xlsx')):
+                            results["table_files"].append(file_info)
+                        elif key.endswith('.md'):
+                            results["markdown_files"].append(file_info)
+                        else:
+                            results["other_files"].append(file_info)
+            
+            except Exception as e:
+                # Don't fail if one path has issues, just continue
+                print(f"Error checking path {s3_path}: {str(e)}")
+                continue
+        
+        # Add metadata about the processing
+        results["metadata"] = {
+            "original_filename": filename,
+            "processing_date": datetime.datetime.now().isoformat(),
+            "total_files_found": (
+                len(results["text_files"]) + 
+                len(results["image_files"]) + 
+                len(results["table_files"]) + 
+                len(results["markdown_files"]) +
+                len(results["other_files"])
+            )
+        }
+        
+        return results
     
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to list PDF contents: {str(e)}")    
 @app.get("/convert-pdf-markdown")
 async def convert_pdf_to_markdown_api(service_type: str = Query("Open Source")):
     """
