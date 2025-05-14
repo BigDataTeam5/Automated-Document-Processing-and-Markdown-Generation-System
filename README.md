@@ -123,15 +123,13 @@ pip install -r requirements
 4. Open your browser and navigate to `http://localhost:8501` to interact with the application.
 
 ---
+
 ## Deployment Strategies to Gcloud:
 1.Dockerise
    a.There are 2 DockerFiles in the frontend(Streamlit) and api(FASTAPI) folders.
    b.After installing Docker Desktop,create the docker images using the following commands
    create the fast api docker image
    before that run the following commands to authorize Google Cloud SDK.And make sure you run these command in the root directory of the project.
-   ```bash
-      
-   ```
    
 ## Contributing
 
