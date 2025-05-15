@@ -74,6 +74,48 @@ latest_file_details = {}
 #         Params={"Bucket": bucket, "Key": key},
 #         ExpiresIn=expiration
 #     )
+def cleanup_local_files(keep_most_recent=True):
+    """
+    Cleans up local temporary files, keeping only the most recent ones if specified.
+    """
+    import shutil
+    try:
+        # Directories to clean
+        dirs_to_clean = [
+            os.path.join(os.getcwd(), "output_data"),
+            os.path.join(os.getcwd(), "output")
+        ]
+        
+        for directory in dirs_to_clean:
+            if not os.path.exists(directory):
+                continue
+                
+            # List all items in the directory
+            items = [os.path.join(directory, item) for item in os.listdir(directory)]
+            
+            if not items:
+                continue
+                
+            if keep_most_recent:
+                # Sort by modification time (newest last)
+                items.sort(key=os.path.getmtime)
+                # Keep only the most recent item
+                keep_item = items[-1]
+                items = [item for item in items if item != keep_item]
+            
+            # Delete the items
+            for item in items:
+                if os.path.isdir(item):
+                    shutil.rmtree(item)
+                else:
+                    os.remove(item)
+                print(f"🗑️ Removed: {item}")
+                
+        return {"status": "success", "message": "Cleanup completed successfully"}
+    except Exception as e:
+        print(f"❌ Cleanup error: {str(e)}")
+        return {"status": "error", "message": f"Cleanup failed: {str(e)}"}
+
 def check_pdf_constraints(pdf_path):
     """
     Check if the PDF meets the file size and page count constraints.
@@ -123,7 +165,7 @@ async def root():
     return {"message": "FastAPI is running on Cloud Run!"}
 
 @app.post("/upload-pdf")
-async def upload_pdf(file: UploadFile = File(...)) -> Dict[str, str]:
+async def upload_pdf(file: UploadFile = File(...), service_type: str = Query("")) -> Dict[str, str]:
     """
     Uploads a PDF file to AWS S3 after checking constraints.
     """
@@ -139,33 +181,33 @@ async def upload_pdf(file: UploadFile = File(...)) -> Dict[str, str]:
     temp_pdf_path = None  # Define temp path for cleanup
 
     try:
-        # ✅ Save the uploaded file temporarily
+        # Save the uploaded file temporarily
         with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as temp_pdf:
             temp_pdf.write(file.file.read())
             temp_pdf_path = temp_pdf.name
 
-        # ✅ Check PDF constraints
-        constraint_check = check_pdf_constraints(temp_pdf_path)
+        # Check PDF constraints for only Enterprise service type
+        if service_type == "Enterprise":
+            constraint_check = check_pdf_constraints(temp_pdf_path)
+            if "error" in constraint_check:
+                os.remove(temp_pdf_path)  # Cleanup temp file
+                raise HTTPException(status_code=400, detail=constraint_check["error"])
 
-        if "error" in constraint_check:
-            os.remove(temp_pdf_path)  # Cleanup temp file
-            raise HTTPException(status_code=400, detail=constraint_check["error"])
-
-        # ✅ Upload file to S3 (only if constraints are met)
+        # Upload file to S3 (only if constraints are met)
         s3_key = f"RawInputs/{file.filename}"
         s3_client.upload_file(temp_pdf_path, S3_BUCKET, s3_key)
 
-        # ✅ Generate pre-signed URL
+        # Generate pre-signed URL
         file_url = s3_client.generate_presigned_url(
             'get_object',
             Params={'Bucket': S3_BUCKET, 'Key': s3_key},
             ExpiresIn=3600  # 1 hour validity
         )
 
-        # ✅ Cleanup: Delete the temp file after successful upload
+        # Cleanup: Delete the temp file after successful upload
         os.remove(temp_pdf_path)
 
-        # ✅ Save the file details globally
+        # Save the file details globally
         global latest_file_details
         latest_file_details = {
             "filename": file.filename,
@@ -176,13 +218,18 @@ async def upload_pdf(file: UploadFile = File(...)) -> Dict[str, str]:
         return {"filename": file.filename, "message": "✅ PDF uploaded successfully!", "file_url": file_url}
 
     except NoCredentialsError:
-        if temp_pdf_path:
+        if temp_pdf_path and os.path.exists(temp_pdf_path):
             os.remove(temp_pdf_path)  # Cleanup on error
         raise HTTPException(status_code=500, detail="AWS credentials not found")
+    except HTTPException as e:
+        if temp_pdf_path and os.path.exists(temp_pdf_path):
+            os.remove(temp_pdf_path)  # Cleanup on error
+        raise e
     except Exception as e:
-        if temp_pdf_path:
+        if temp_pdf_path and os.path.exists(temp_pdf_path):
             os.remove(temp_pdf_path)  # Cleanup on error
         raise HTTPException(status_code=500, detail=f"❌ Upload failed: {str(e)}")
+    
 @app.get("/get-latest-file-url")
 async def get_latest_file_url() -> Dict[str, str]:
     """
@@ -216,6 +263,7 @@ async def get_latest_file_url() -> Dict[str, str]:
 async def parse_uploaded_pdf():
     
     try:
+        cleanup_local_files()
         # Check if the latest file details are available
         if not latest_file_details:
             raise HTTPException(status_code=404, detail="No file has been downloaded yet. Please fetch the latest file first.")
@@ -248,6 +296,7 @@ async def parse_uploaded_pdf_azure():
     Uses the saved latest file details to extract content using Azure Document Intelligence.
     """
     try:
+        cleanup_local_files()
         if not latest_file_details:
             raise HTTPException(status_code=404, detail="No file has been downloaded yet. Please fetch the latest file first.")
 
@@ -272,8 +321,7 @@ async def parse_uploaded_pdf_azure():
 @app.get("/list-pdf-contents")
 async def list_pdf_contents():
     """
-    Lists all the contents and files generated from the most recent PDF processing.
-    Returns information about parsed text, images, tables, and markdown files.
+    Lists only the parsed contents (text, images, tables, markdown) from PDF processing and web scraping.
     """
     import datetime
     try:
@@ -283,30 +331,33 @@ async def list_pdf_contents():
         filename = latest_file_details.get("filename")
         if not filename:
             raise HTTPException(status_code=404, detail="Incomplete file details. Please upload a PDF again.")
+        
 
-        # Get the file name without extension to use as a prefix
-        file_prefix = os.path.splitext(filename)[0]
-        
-        # Define the S3 paths where different content types would be stored
-        paths = {
-            "raw_pdf": f"RawInputs/{filename}",
-            "os_parsed_data": f"pdf_processing_pipeline/pdf_os_pipeline/parsed_data/",
-            "azure_parsed_data": f"pdf_processing_pipeline/pdf_enterprise_pipeline/",
-            "markdown_outputs": f"pdf_processing_pipeline/markdown_outputs/"
+        parsed_content_paths = {
+            "pdf_os_parsed": "pdf_processing_pipeline/pdf_os_pipeline/parsed_data/",
+            "pdf_azure_parsed": "pdf_processing_pipeline/pdf_enterprise_pipeline/",
+            "pdf_markdown": "pdf_processing_pipeline/markdown_outputs/",
+            "web_os_scraped": "scraped_data/scraped_os_data/",
+            "web_en_scraped": "scraped_data/scraped_en_data/"
         }
         
-        # Results dictionary to store all the found content
+        # Results dictionary to store all parsed contents
         results = {
-            "pdf_file": latest_file_details.get("file_url"),
-            "text_files": [],
-            "image_files": [],
-            "table_files": [],
-            "markdown_files": [],
-            "other_files": []
+            "pdf_processing": {
+                "text": [],
+                "images": [], 
+                "tables": [],
+                "markdown": []
+            },
+            "web_scraping": {
+                "text": [],
+                "images": [],
+                "markdown": []
+            }
         }
         
-        # Check each path for relevant content
-        for path_type, s3_path in paths.items():
+        # Check each path for parsed content
+        for content_type, s3_path in parsed_content_paths.items():
             try:
                 # List objects with this prefix
                 response = s3_client.list_objects_v2(
@@ -322,57 +373,52 @@ async def list_pdf_contents():
                         url = s3_client.generate_presigned_url(
                             'get_object',
                             Params={'Bucket': S3_BUCKET, 'Key': key},
-                            ExpiresIn=3600  # 1 hour validity
+                            ExpiresIn=3600 
                         )
                         
-                        # Categorize the file based on extension or path
                         file_info = {
                             "filename": key.split("/")[-1],
-                            "path": key,
                             "url": url,
-                            "size": item["Size"],
                             "last_modified": item["LastModified"].isoformat()
                         }
                         
-                        if key.endswith('.txt'):
-                            results["text_files"].append(file_info)
-                        elif key.endswith(('.png', '.jpg', '.jpeg', '.gif')):
-                            results["image_files"].append(file_info)
-                        elif key.endswith(('.csv', '.xlsx')):
-                            results["table_files"].append(file_info)
-                        elif key.endswith('.md'):
-                            results["markdown_files"].append(file_info)
-                        else:
-                            results["other_files"].append(file_info)
+                       
+                        if content_type.startswith("pdf_"):
+                            if key.endswith('.txt'):
+                                results["pdf_processing"]["text"].append(file_info)
+                            elif key.endswith(('.png', '.jpg', '.jpeg', '.gif')):
+                                results["pdf_processing"]["images"].append(file_info)
+                            elif key.endswith(('.csv', '.xlsx')):
+                                results["pdf_processing"]["tables"].append(file_info)
+                            elif key.endswith('.md'):
+                                results["pdf_processing"]["markdown"].append(file_info)
+                        elif content_type.startswith("web_"):
+                            if key.endswith('.txt'):
+                                results["web_scraping"]["text"].append(file_info)
+                            elif key.endswith(('.png', '.jpg', '.jpeg', '.gif')):
+                                results["web_scraping"]["images"].append(file_info)
+                            elif key.endswith('.md'):
+                                results["web_scraping"]["markdown"].append(file_info)
             
             except Exception as e:
-                # Don't fail if one path has issues, just continue
                 print(f"Error checking path {s3_path}: {str(e)}")
                 continue
         
-        # Add metadata about the processing
-        results["metadata"] = {
-            "original_filename": filename,
-            "processing_date": datetime.datetime.now().isoformat(),
-            "total_files_found": (
-                len(results["text_files"]) + 
-                len(results["image_files"]) + 
-                len(results["table_files"]) + 
-                len(results["markdown_files"]) +
-                len(results["other_files"])
-            )
-        }
+        # Add timestamp for the response
+        results["timestamp"] = datetime.datetime.now().isoformat()
         
         return results
     
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to list PDF contents: {str(e)}")    
+        raise HTTPException(status_code=500, detail=f"Failed to list parsed contents: {str(e)}")
+
 @app.get("/convert-pdf-markdown")
 async def convert_pdf_to_markdown_api(service_type: str = Query("Open Source")):
     """
     Uses the saved latest file details to convert the PDF into markdown using Docling.
     """
     try:
+        cleanup_local_files()
         if not latest_file_details:
             raise HTTPException(status_code=404, detail="No file has been downloaded yet. Please fetch the latest file first.")
 
@@ -395,68 +441,6 @@ async def convert_pdf_to_markdown_api(service_type: str = Query("Open Source")):
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Docling Markdown conversion failed: {str(e)}")
     
-@app.get("/fetch-latest-markdown-urls")
-async def fetch_latest_markdown_from_s3():
-    """
-    Fetch Markdown file URLs from the latest job-specific subfolder in S3.
-    """
-    try:
-        # Base folder where markdowns are stored
-        s3_base_folder = "pdf_processing_pipeline/markdown_outputs/"
-
-        # Fetch all objects under markdown_outputs
-        response = s3_client.list_objects_v2(Bucket=S3_BUCKET, Prefix=s3_base_folder, Delimiter='/')
-
-        if "CommonPrefixes" not in response:
-            raise HTTPException(status_code=404, detail="No markdown folders found in S3.")
-
-        # Extract all job-specific subfolders
-        subfolders = [prefix["Prefix"] for prefix in response["CommonPrefixes"]]
-
-        if not subfolders:
-            raise HTTPException(status_code=404, detail="No markdown subfolders found in S3.")
-
-        # Fetch last modified markdown file inside each subfolder
-        latest_folder = None
-        latest_time = None
-
-        for folder in subfolders:
-            # List files inside each subfolder
-            folder_response = s3_client.list_objects_v2(Bucket=S3_BUCKET, Prefix=folder)
-
-            if "Contents" not in folder_response:
-                continue
-
-            # Get the latest modified file inside the folder
-            for obj in folder_response["Contents"]:
-                if obj["Key"].endswith(".md"):
-                    last_modified = obj["LastModified"]
-
-                    if latest_time is None or last_modified > latest_time:
-                        latest_folder = folder
-                        latest_time = last_modified
-
-        if latest_folder is None:
-            raise HTTPException(status_code=404, detail="No markdown files found in subfolders.")
-
-        # Fetch all markdown files inside the latest folder
-        latest_folder_response = s3_client.list_objects_v2(Bucket=S3_BUCKET, Prefix=latest_folder)
-        markdown_urls = [
-            f"https://{S3_BUCKET}.s3.amazonaws.com/{obj['Key']}"
-            for obj in latest_folder_response["Contents"]
-            if obj["Key"].endswith(".md")
-        ]
-
-        return {
-            "message": f"Fetched Markdown files from the latest subfolder: {latest_folder}",
-            "latest_folder": latest_folder,
-            "markdown_files": markdown_urls
-        }
-
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to fetch markdown files: {str(e)}")
-    
-
 @app.get("/fetch-latest-markdown-downloads")
 async def fetch_latest_markdown_downloads():
     """
@@ -500,7 +484,6 @@ async def fetch_latest_markdown_downloads():
         if latest_folder is None:
             raise HTTPException(status_code=404, detail="No markdown files found in subfolders.")
 
-        # ✅ List all Markdown files inside the latest folder
         latest_folder_response = s3_client.list_objects_v2(Bucket=S3_BUCKET, Prefix=latest_folder)
         markdown_files = [
             obj["Key"] for obj in latest_folder_response["Contents"] if obj["Key"].endswith(".md")
@@ -519,9 +502,6 @@ async def fetch_latest_markdown_downloads():
                 ExpiresIn=3600 
             )
 
-            # ✅ Option 2: Use direct public URL (if ACL is `public-read`)
-            # download_url = f"https://{S3_BUCKET}.s3.amazonaws.com/{file_key}"
-
             markdown_download_links.append({
                 "file_name": file_key.split("/")[-1],
                 "download_url": download_url
@@ -535,7 +515,7 @@ async def fetch_latest_markdown_downloads():
 
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to fetch markdown downloads: {str(e)}")
-    
+        
 @app.post("/enscrape")
 def scrape_webpage(request: ScrapeRequest):
     """Scrape a webpage using Apify and upload the results to S3."""

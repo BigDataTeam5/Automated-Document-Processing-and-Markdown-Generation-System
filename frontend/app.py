@@ -27,7 +27,6 @@ LATEST_FILE_API = f"{FASTAPI_URL}/get-latest-file-url"
 PARSE_PDF_API = f"{FASTAPI_URL}/parse-pdf"
 PARSE_PDF_AZURE_API = f"{FASTAPI_URL}/parse-pdf-azure"
 CONVERT_MARKDOWN_API = f"{FASTAPI_URL}/convert-pdf-markdown"
-FETCH_MARKDOWN_API = f"{FASTAPI_URL}/fetch-latest-markdown-urls"
 FETCH_DOWNLOADABLE_MARKDOWN_API = f"{FASTAPI_URL}/fetch-latest-markdown-downloads"
 SCRAPE_OS_API = f"{FASTAPI_URL}/OpenSourceWebscrape/"
 SCRAPE_EN_API = f"{FASTAPI_URL}/enscrape"
@@ -166,31 +165,6 @@ def convert_to_markdown():
         except requests.exceptions.RequestException as e:
             progress_bar.empty()
             return {"error": f"⚠️ API Request Failed: {str(e)}"}
-# Function to Fetch Markdown File from S3
-def fetch_markdown():
-    with st.spinner("⏳ Fetching Markdown File from S3... Please wait."):
-        progress_bar = st.progress(0)  # Initialize progress bar
-
-        try:
-            for i in range(10):  # Simulate progress
-                time.sleep(0.5)
-                progress_bar.progress((i + 1) * 10)
-
-            response = requests.get(FETCH_MARKDOWN_API)
-            if response.status_code == 200:
-                markdown_files = response.json().get("files", [])
-                progress_bar.empty()
-                if markdown_files:
-                    return {"markdown_file": markdown_files[-1]}  # Show latest markdown file
-                else:
-                    return {"error": "No markdown file found!"}
-            else:
-                progress_bar.empty()
-                return {"error": "Failed to fetch markdown files!"}
-
-        except requests.RequestException as e:
-            progress_bar.empty()
-            return {"error": str(e)}
 # Function to Fetch Downloadable Markdown Files from S3
 def fetch_downloadable_markdown():
     """
