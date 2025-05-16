@@ -39,6 +39,11 @@ url_input = None  # Define url_input globally
 with st.sidebar:
     if st.button("🔁 Reset"):
         st.session_state.clear()
+        # Re-initialize essential session state variables after clearing
+        st.session_state.markdown_history = []
+        st.session_state.file_uploaded = False
+        st.session_state.extraction_complete = False
+        st.session_state.markdown_ready = False
     st.subheader("Select Options")
 
     # Dropdown for processing type

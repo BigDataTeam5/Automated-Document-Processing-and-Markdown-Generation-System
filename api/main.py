@@ -68,53 +68,6 @@ app.add_middleware(
 
 # Global storage for file details
 latest_file_details = {}
-# def generate_presigned_url(bucket, key, expiration=3600):
-#     return s3_client.generate_presigned_url(
-#         "get_object",
-#         Params={"Bucket": bucket, "Key": key},
-#         ExpiresIn=expiration
-#     )
-def cleanup_local_files(keep_most_recent=True):
-    """
-    Cleans up local temporary files, keeping only the most recent ones if specified.
-    """
-    import shutil
-    try:
-        # Directories to clean
-        dirs_to_clean = [
-            os.path.join(os.getcwd(), "output_data"),
-            os.path.join(os.getcwd(), "output")
-        ]
-        
-        for directory in dirs_to_clean:
-            if not os.path.exists(directory):
-                continue
-                
-            # List all items in the directory
-            items = [os.path.join(directory, item) for item in os.listdir(directory)]
-            
-            if not items:
-                continue
-                
-            if keep_most_recent:
-                # Sort by modification time (newest last)
-                items.sort(key=os.path.getmtime)
-                # Keep only the most recent item
-                keep_item = items[-1]
-                items = [item for item in items if item != keep_item]
-            
-            # Delete the items
-            for item in items:
-                if os.path.isdir(item):
-                    shutil.rmtree(item)
-                else:
-                    os.remove(item)
-                print(f"🗑️ Removed: {item}")
-                
-        return {"status": "success", "message": "Cleanup completed successfully"}
-    except Exception as e:
-        print(f"❌ Cleanup error: {str(e)}")
-        return {"status": "error", "message": f"Cleanup failed: {str(e)}"}
 
 def check_pdf_constraints(pdf_path):
     """
@@ -185,17 +138,21 @@ async def upload_pdf(file: UploadFile = File(...), service_type: str = Query("")
         with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as temp_pdf:
             temp_pdf.write(file.file.read())
             temp_pdf_path = temp_pdf.name
+            print(f"Temporary PDF saved at: {temp_pdf_path}")
 
         # Check PDF constraints for only Enterprise service type
         if service_type == "Enterprise":
             constraint_check = check_pdf_constraints(temp_pdf_path)
             if "error" in constraint_check:
-                os.remove(temp_pdf_path)  # Cleanup temp file
+                if os.path.exists(temp_pdf_path):
+                    os.remove(temp_pdf_path)  # Cleanup temp file
+                    print(f"Deleted temporary PDF due to constraint error: {temp_pdf_path}")
                 raise HTTPException(status_code=400, detail=constraint_check["error"])
 
         # Upload file to S3 (only if constraints are met)
         s3_key = f"RawInputs/{file.filename}"
         s3_client.upload_file(temp_pdf_path, S3_BUCKET, s3_key)
+        print(f"Successfully uploaded {temp_pdf_path} to S3 bucket {S3_BUCKET} at key {s3_key}")
 
         # Generate pre-signed URL
         file_url = s3_client.generate_presigned_url(
@@ -204,10 +161,7 @@ async def upload_pdf(file: UploadFile = File(...), service_type: str = Query("")
             ExpiresIn=3600  # 1 hour validity
         )
 
-        # Cleanup: Delete the temp file after successful upload
-        os.remove(temp_pdf_path)
-
-        # Save the file details globally
+        # Save the file details globally - do this BEFORE deleting the file
         global latest_file_details
         latest_file_details = {
             "filename": file.filename,
@@ -215,79 +169,110 @@ async def upload_pdf(file: UploadFile = File(...), service_type: str = Query("")
             "s3_key": s3_key,
         }
 
+        # Cleanup: Delete the temp file after successful upload
+        if temp_pdf_path and os.path.exists(temp_pdf_path):
+            os.remove(temp_pdf_path)
+            print(f"Successfully deleted temporary PDF after S3 upload: {temp_pdf_path}")
+
         return {"filename": file.filename, "message": "✅ PDF uploaded successfully!", "file_url": file_url}
 
     except NoCredentialsError:
         if temp_pdf_path and os.path.exists(temp_pdf_path):
             os.remove(temp_pdf_path)  # Cleanup on error
+            print(f"Deleted temporary PDF due to credential error: {temp_pdf_path}")
         raise HTTPException(status_code=500, detail="AWS credentials not found")
     except HTTPException as e:
         if temp_pdf_path and os.path.exists(temp_pdf_path):
             os.remove(temp_pdf_path)  # Cleanup on error
+            print(f"Deleted temporary PDF due to HTTP exception: {temp_pdf_path}")
         raise e
     except Exception as e:
         if temp_pdf_path and os.path.exists(temp_pdf_path):
             os.remove(temp_pdf_path)  # Cleanup on error
+            print(f"Deleted temporary PDF due to exception: {temp_pdf_path}")
         raise HTTPException(status_code=500, detail=f"❌ Upload failed: {str(e)}")
-    
+
 @app.get("/get-latest-file-url")
 async def get_latest_file_url() -> Dict[str, str]:
     """
-    Retrieve the most recently uploaded file's URL, download it locally, and save the details.
+    Retrieve the most recently uploaded file's URL.
     """
     if not latest_file_details:
         raise HTTPException(status_code=404, detail="No files have been uploaded yet")
 
-    # Define local download path
-    project_root = os.getcwd()
-    downloaded_pdf_path = os.path.join(project_root, latest_file_details["filename"])
-
-    # Download the file
-    try:
-        response = requests.get(latest_file_details["file_url"])
-        response.raise_for_status()
-        with open(downloaded_pdf_path, "wb") as pdf_file:
-            pdf_file.write(response.content)
-        print(f"[INFO] PDF downloaded successfully: {downloaded_pdf_path}")
-
-        # Update the local path in the global file details
-        latest_file_details["local_path"] = downloaded_pdf_path
-
-    except requests.exceptions.RequestException as e:
-        raise HTTPException(status_code=500, detail=f"Failed to download PDF: {str(e)}")
-
-    return latest_file_details
-
+    # Return the file URL and details - no need to download locally
+    return {
+        "filename": latest_file_details.get("filename"),
+        "file_url": latest_file_details.get("file_url"),
+        "s3_key": latest_file_details.get("s3_key")
+    }
 
 @app.get("/parse-pdf")
 async def parse_uploaded_pdf():
+    """
+    Uses the saved latest file details to extract content using Open Source parser.
+    """
+    temp_pdf_path = None
+    temp_output_dir = None
     
     try:
-        cleanup_local_files()
         # Check if the latest file details are available
         if not latest_file_details:
             raise HTTPException(status_code=404, detail="No file has been downloaded yet. Please fetch the latest file first.")
 
         # Extract the details from the saved data
-        local_path = latest_file_details.get("local_path")
+        file_url = latest_file_details.get("file_url")
         filename = latest_file_details.get("filename")
 
-        if not local_path or not filename:
+        if not file_url or not filename:
             raise HTTPException(status_code=404, detail="Incomplete file details. Please fetch the latest file again.")
 
-        # Define output directory for extraction
-        output_dir = os.path.join(os.getcwd(), "output_data")
+        # Create a temporary file for the downloaded PDF
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as temp_pdf:
+            temp_pdf_path = temp_pdf.name
+            
+            # Download the file to the temporary location
+            response = requests.get(file_url)
+            response.raise_for_status()
+            temp_pdf.write(response.content)
+            print(f"[INFO] PDF downloaded to temporary file: {temp_pdf_path}")
 
-        # Extract data from the locally downloaded PDF
-        extract_all_from_pdf(local_path, output_dir)
+        # Create a temporary directory for output files
+        temp_output_dir = tempfile.mkdtemp()
+        print(f"[INFO] Created temporary output directory: {temp_output_dir}")
 
-        return {
+        # Extract data from the downloaded PDF to temporary directory
+        extract_all_from_pdf(temp_pdf_path, temp_output_dir)
+        
+        # Process is complete, return success
+        result = {
             "filename": filename,
             "message": "PDF parsed successfully and extracted data uploaded to S3",
-            "local_path": local_path,
         }
+        
+        # Clean up temporary files
+        if temp_pdf_path and os.path.exists(temp_pdf_path):
+            os.remove(temp_pdf_path)
+            print(f"[INFO] Removed temporary PDF file: {temp_pdf_path}")
+            
+        if temp_output_dir and os.path.exists(temp_output_dir):
+            import shutil
+            shutil.rmtree(temp_output_dir)
+            print(f"[INFO] Removed temporary output directory: {temp_output_dir}")
+            
+        return result
 
     except Exception as e:
+        # Clean up temporary files in case of errors
+        if temp_pdf_path and os.path.exists(temp_pdf_path):
+            os.remove(temp_pdf_path)
+            print(f"[INFO] Removed temporary PDF file due to error: {temp_pdf_path}")
+            
+        if temp_output_dir and os.path.exists(temp_output_dir):
+            import shutil
+            shutil.rmtree(temp_output_dir)
+            print(f"[INFO] Removed temporary output directory due to error: {temp_output_dir}")
+            
         raise HTTPException(status_code=500, detail=f"Parsing failed: {str(e)}")
 
 @app.get("/parse-pdf-azure")
@@ -295,28 +280,105 @@ async def parse_uploaded_pdf_azure():
     """
     Uses the saved latest file details to extract content using Azure Document Intelligence.
     """
+    temp_pdf_path = None
+    
     try:
-        cleanup_local_files()
+        # Check if the latest file details are available
         if not latest_file_details:
             raise HTTPException(status_code=404, detail="No file has been downloaded yet. Please fetch the latest file first.")
 
-        local_path = latest_file_details.get("local_path")
+        file_url = latest_file_details.get("file_url")
         filename = latest_file_details.get("filename")
 
-        if not local_path or not filename:
+        if not file_url or not filename:
             raise HTTPException(status_code=404, detail="Incomplete file details. Please fetch the latest file again.")
 
-        # Extract data from the locally downloaded PDF using Azure Document Intelligence
-        extract_and_upload_pdf(local_path)
+        # Create a temporary file for the downloaded PDF
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as temp_pdf:
+            temp_pdf_path = temp_pdf.name
+            
+            # Download the file to the temporary location
+            response = requests.get(file_url)
+            response.raise_for_status()
+            temp_pdf.write(response.content)
+            print(f"[INFO] PDF downloaded to temporary file: {temp_pdf_path}")
 
-        return {
+        # Extract data using Azure Document Intelligence
+        extract_and_upload_pdf(temp_pdf_path)
+        
+        # Process is complete, return success
+        result = {
             "filename": filename,
             "message": "PDF parsed successfully using Azure Document Intelligence, data uploaded to S3",
-            "local_path": local_path,
         }
+        
+        # Clean up temporary files
+        if temp_pdf_path and os.path.exists(temp_pdf_path):
+            os.remove(temp_pdf_path)
+            print(f"[INFO] Removed temporary PDF file: {temp_pdf_path}")
+            
+        return result
 
     except Exception as e:
+        # Clean up temporary files in case of errors
+        if temp_pdf_path and os.path.exists(temp_pdf_path):
+            os.remove(temp_pdf_path)
+            print(f"[INFO] Removed temporary PDF file due to error: {temp_pdf_path}")
+            
         raise HTTPException(status_code=500, detail=f"Azure PDF Processing failed: {str(e)}")
+
+@app.get("/convert-pdf-markdown")
+async def convert_pdf_to_markdown_api(service_type: str = Query("Open Source")):
+    """
+    Uses the saved latest file details to convert the PDF into markdown using Docling.
+    """
+    temp_pdf_path = None
+    
+    try:
+        # Check if the latest file details are available
+        if not latest_file_details:
+            raise HTTPException(status_code=404, detail="No file has been downloaded yet. Please fetch the latest file first.")
+
+        file_url = latest_file_details.get("file_url")
+        filename = latest_file_details.get("filename")
+
+        if not file_url or not filename:
+            raise HTTPException(status_code=404, detail="Incomplete file details. Please fetch the latest file again.")
+
+        # Create a temporary file for the downloaded PDF
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as temp_pdf:
+            temp_pdf_path = temp_pdf.name
+            
+            # Download the file to the temporary location
+            response = requests.get(file_url)
+            response.raise_for_status()
+            temp_pdf.write(response.content)
+            print(f"[INFO] PDF downloaded to temporary file: {temp_pdf_path}")
+
+        # Convert PDF to Markdown using Docling
+        main(temp_pdf_path, service_type)
+        
+        # Process is complete, return success
+        result = {
+            "filename": filename,
+            "message": "PDF successfully converted to Markdown using Docling and uploaded to S3",
+        }
+        
+        # Clean up temporary files
+        if temp_pdf_path and os.path.exists(temp_pdf_path):
+            os.remove(temp_pdf_path)
+            print(f"[INFO] Removed temporary PDF file: {temp_pdf_path}")
+            
+        return result
+
+    except Exception as e:
+        # Clean up temporary files in case of errors
+        if temp_pdf_path and os.path.exists(temp_pdf_path):
+            os.remove(temp_pdf_path)
+            print(f"[INFO] Removed temporary PDF file due to error: {temp_pdf_path}")
+            
+        raise HTTPException(status_code=500, detail=f"Docling Markdown conversion failed: {str(e)}")
+    
 
 @app.get("/list-pdf-contents")
 async def list_pdf_contents():
@@ -412,35 +474,110 @@ async def list_pdf_contents():
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to list parsed contents: {str(e)}")
 
+@app.get("/parse-pdf-azure")
+async def parse_uploaded_pdf_azure():
+    """
+    Uses the saved latest file details to extract content using Azure Document Intelligence.
+    """
+    temp_pdf_path = None
+    
+    try:
+        # Check if the latest file details are available
+        if not latest_file_details:
+            raise HTTPException(status_code=404, detail="No file has been downloaded yet. Please fetch the latest file first.")
+
+        file_url = latest_file_details.get("file_url")
+        filename = latest_file_details.get("filename")
+
+        if not file_url or not filename:
+            raise HTTPException(status_code=404, detail="Incomplete file details. Please fetch the latest file again.")
+
+        # Create a temporary file for the downloaded PDF
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as temp_pdf:
+            temp_pdf_path = temp_pdf.name
+            
+            # Download the file to the temporary location
+            response = requests.get(file_url)
+            response.raise_for_status()
+            temp_pdf.write(response.content)
+            print(f"[INFO] PDF downloaded to temporary file: {temp_pdf_path}")
+
+        # Extract data using Azure Document Intelligence
+        extract_and_upload_pdf(temp_pdf_path)
+        
+        # Process is complete, return success
+        result = {
+            "filename": filename,
+            "message": "PDF parsed successfully using Azure Document Intelligence, data uploaded to S3",
+        }
+        
+        # Clean up temporary files
+        if temp_pdf_path and os.path.exists(temp_pdf_path):
+            os.remove(temp_pdf_path)
+            print(f"[INFO] Removed temporary PDF file: {temp_pdf_path}")
+            
+        return result
+
+    except Exception as e:
+        # Clean up temporary files in case of errors
+        if temp_pdf_path and os.path.exists(temp_pdf_path):
+            os.remove(temp_pdf_path)
+            print(f"[INFO] Removed temporary PDF file due to error: {temp_pdf_path}")
+            
+        raise HTTPException(status_code=500, detail=f"Azure PDF Processing failed: {str(e)}")
+
 @app.get("/convert-pdf-markdown")
 async def convert_pdf_to_markdown_api(service_type: str = Query("Open Source")):
     """
     Uses the saved latest file details to convert the PDF into markdown using Docling.
     """
+    temp_pdf_path = None
+    
     try:
-        cleanup_local_files()
+        # Check if the latest file details are available
         if not latest_file_details:
             raise HTTPException(status_code=404, detail="No file has been downloaded yet. Please fetch the latest file first.")
 
-        local_path = latest_file_details.get("local_path")
+        file_url = latest_file_details.get("file_url")
         filename = latest_file_details.get("filename")
 
-        if not local_path or not filename:
+        if not file_url or not filename:
             raise HTTPException(status_code=404, detail="Incomplete file details. Please fetch the latest file again.")
 
+        # Create a temporary file for the downloaded PDF
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as temp_pdf:
+            temp_pdf_path = temp_pdf.name
+            
+            # Download the file to the temporary location
+            response = requests.get(file_url)
+            response.raise_for_status()
+            temp_pdf.write(response.content)
+            print(f"[INFO] PDF downloaded to temporary file: {temp_pdf_path}")
+
+        # Convert PDF to Markdown using Docling
+        main(temp_pdf_path, service_type)
         
-        main(local_path,service_type)
-
-
-        return {
+        # Process is complete, return success
+        result = {
             "filename": filename,
             "message": "PDF successfully converted to Markdown using Docling and uploaded to S3",
-            "local_path": local_path,
         }
+        
+        # Clean up temporary files
+        if temp_pdf_path and os.path.exists(temp_pdf_path):
+            os.remove(temp_pdf_path)
+            print(f"[INFO] Removed temporary PDF file: {temp_pdf_path}")
+            
+        return result
 
     except Exception as e:
+        # Clean up temporary files in case of errors
+        if temp_pdf_path and os.path.exists(temp_pdf_path):
+            os.remove(temp_pdf_path)
+            print(f"[INFO] Removed temporary PDF file due to error: {temp_pdf_path}")
+            
         raise HTTPException(status_code=500, detail=f"Docling Markdown conversion failed: {str(e)}")
-    
+
 @app.get("/fetch-latest-markdown-downloads")
 async def fetch_latest_markdown_downloads():
     """

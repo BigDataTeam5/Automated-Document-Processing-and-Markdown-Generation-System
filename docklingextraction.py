@@ -7,7 +7,7 @@ from docling.datamodel.pipeline_options import PdfPipelineOptions
 from docling.document_converter import DocumentConverter, PdfFormatOption
 import boto3
 import os
-from open_source_parsing import upload_file_to_s3
+from PDF_Extraction_and_Markdown_Generation.open_source_parsing import upload_file_to_s3
 
 # AWS S3 Configuration
 s3 = boto3.client('s3',
@@ -18,25 +18,18 @@ bucket_name = os.getenv('AWS_BUCKET_NAME')
 # Constants
 IMAGE_RESOLUTION_SCALE = 2.0
 
-def main(pdf_path, service_type):
-    """
-    Convert PDF to markdown (with embedded images and with image references)
-    Only creates and uploads the markdown files, not the individual images.
-    
-    Args:
-        pdf_path: Path to the PDF file
-        service_type: Service type (Open Source or Enterprise)
-    """
+def main(pdf_path,service_type):
     logging.basicConfig(level=logging.INFO)
-    
+
     input_doc_path = Path(pdf_path)
     output_dir = Path(f"output/{Path(pdf_path).stem}")
+
 
     # Configure pipeline options
     pipeline_options = PdfPipelineOptions()
     pipeline_options.images_scale = IMAGE_RESOLUTION_SCALE
-    pipeline_options.generate_page_images = False  # Don't generate page images
-    pipeline_options.generate_picture_images = False  # Don't generate picture images
+    pipeline_options.generate_page_images = True
+    pipeline_options.generate_picture_images = True
 
     doc_converter = DocumentConverter(
         format_options={
@@ -48,38 +41,55 @@ def main(pdf_path, service_type):
     # Convert the document
     conv_res = doc_converter.convert(input_doc_path)
 
-    # Define job-specific folder based on PDF filename and service type
+    output_dir.mkdir(parents=True, exist_ok=True)
     doc_filename = conv_res.input.file.stem
+# Define job-specific folder based on PDF filename and service type
     job_folder = f"{doc_filename}-{service_type}"
     s3_folder = f"pdf_processing_pipeline/markdown_outputs/{job_folder}/"
 
     # Create a local output directory for the job
+    output_dir = output_dir / job_folder
     output_dir.mkdir(parents=True, exist_ok=True)
-    job_output_dir = output_dir / job_folder
-    job_output_dir.mkdir(parents=True, exist_ok=True)
 
-    # Only create and upload the two markdown files
+    # ✅ Save page images inside the job-specific folder
+    for page_no, page in conv_res.document.pages.items():
+        page_image_filename = output_dir / f"{doc_filename}-{page_no}.png"
+        with page_image_filename.open("wb") as fp:
+            page.image.pil_image.save(fp, format="PNG")
+        # ✅ Upload to S3 inside the job-specific folder
+        upload_file_to_s3(str(page_image_filename), f"{s3_folder}{page_image_filename.name}")
 
-    # 1. Save markdown with embedded images inside the job-specific folder
-    md_filename_embedded = job_output_dir / f"{doc_filename}-with-images.md"
+    # ✅ Save images of tables and figures inside the job-specific folder
+    table_counter = 0
+    picture_counter = 0
+    for element, _level in conv_res.document.iterate_items():
+        if isinstance(element, TableItem):
+            table_counter += 1
+            element_image_filename = output_dir / f"{doc_filename}-table-{table_counter}.png"
+            with element_image_filename.open("wb") as fp:
+                element.get_image(conv_res.document).save(fp, "PNG")
+            # ✅ Upload to S3 inside the job-specific folder
+            upload_file_to_s3(str(element_image_filename), f"{s3_folder}{element_image_filename.name}")
+
+        if isinstance(element, PictureItem):
+            picture_counter += 1
+            element_image_filename = output_dir / f"{doc_filename}-picture-{picture_counter}.png"
+            with element_image_filename.open("wb") as fp:
+                element.get_image(conv_res.document).save(fp, "PNG")
+            # ✅ Upload to S3 inside the job-specific folder
+            upload_file_to_s3(str(element_image_filename), f"{s3_folder}{element_image_filename.name}")
+
+    # ✅ Save markdown with embedded images inside the job-specific folder
+    md_filename_embedded = output_dir / f"{doc_filename}-with-images.md"
     conv_res.document.save_as_markdown(md_filename_embedded, image_mode=ImageRefMode.EMBEDDED)
-    # Upload to S3 inside the job-specific folder
+    # ✅ Upload to S3 inside the job-specific folder
     upload_file_to_s3(str(md_filename_embedded), f"{s3_folder}{md_filename_embedded.name}")
-    logging.info(f"✅ Created and uploaded markdown with embedded images: {md_filename_embedded.name}")
 
-    # 2. Save markdown with externally referenced images inside the job-specific folder
-    md_filename_referenced = job_output_dir / f"{doc_filename}-with-image-refs.md"
+    # ✅ Save markdown with externally referenced images inside the job-specific folder
+    md_filename_referenced = output_dir / f"{doc_filename}-with-image-refs.md"
     conv_res.document.save_as_markdown(md_filename_referenced, image_mode=ImageRefMode.REFERENCED)
-    # Upload to S3 inside the job-specific folder
+    # ✅ Upload to S3 inside the job-specific folder
     upload_file_to_s3(str(md_filename_referenced), f"{s3_folder}{md_filename_referenced.name}")
-    logging.info(f"✅ Created and uploaded markdown with image references: {md_filename_referenced.name}")
 
     end_time = time.time() - start_time
     logging.info(f"Document converted and saved in {end_time:.2f} seconds. Files stored in: {s3_folder}")
-    
-    # Return information about the created files
-    return {
-        "embedded_markdown": f"{s3_folder}{md_filename_embedded.name}",
-        "referenced_markdown": f"{s3_folder}{md_filename_referenced.name}",
-        "processing_time": f"{end_time:.2f} seconds"
-    }
