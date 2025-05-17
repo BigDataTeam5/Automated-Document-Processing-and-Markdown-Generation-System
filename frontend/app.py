@@ -21,7 +21,7 @@ if "markdown_history" not in st.session_state:
 
 # FastAPI Base URL (Update this with the correct deployed FastAPI URL)
 # FASTAPI_URL = "https://fastapi-app-974490277552.us-central1.run.app"
-FASTAPI_URL = "http://localhost:8080"
+FASTAPI_URL = "https://pdf-markdown-app.1vittl6yfklm.us-east.codeengine.appdomain.cloud/"
 # API Endpoints
 UPLOAD_PDF_API = f"{FASTAPI_URL}/upload-pdf"
 LATEST_FILE_API = f"{FASTAPI_URL}/get-latest-file-url"
