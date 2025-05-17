@@ -1,7 +1,7 @@
 import streamlit as st
 import requests
 import time
-
+import toml
 # Streamlit UI
 st.set_page_config(page_title="📄 PDF Processing & Markdown Viewer", layout="wide")
 # Initialize session state variables if they do not exist
@@ -19,9 +19,10 @@ if "show_url_input" not in st.session_state:
 if "markdown_history" not in st.session_state:
     st.session_state.markdown_history = []  # To store history of markdown files
 
-# FastAPI Base URL (Update this with the correct deployed FastAPI URL)
-# FASTAPI_URL = "https://fastapi-app-974490277552.us-central1.run.app"
-FASTAPI_URL = "https://pdf-markdown-app.1vittl6yfklm.us-east.codeengine.appdomain.cloud/"
+with open("config.toml", "r") as f:
+    config = toml.load(f)
+    FASTAPI_URL = config["fastapi"]["url"] 
+
 # API Endpoints
 UPLOAD_PDF_API = f"{FASTAPI_URL}/upload-pdf"
 LATEST_FILE_API = f"{FASTAPI_URL}/get-latest-file-url"
