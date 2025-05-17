@@ -1,7 +1,0 @@
-# Ignore everything by default
-**
-
-# Allow only the frontend directory
-!frontend/
-!frontend/app.py
-!frontend/requirements.txt
