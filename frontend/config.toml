@@ -1,3 +1,3 @@
 # Backend API configuration
 [fastapi]
-url = "https://pdf-markdown-app.1vittl6yfklm.us-east.codeengine.appdomain.cloud/"
+url = "http://34.171.253.102:8080"
