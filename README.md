@@ -67,6 +67,9 @@ Below is the workflow diagram for the AI Application:
 - Streamlit and FastAPI installed for frontend and backend development and also other libraries.
 
 ---
+## Deployed Links:
+- Streamlit: https://streamlit-frontend-4o32.onrender.com
+- Fastapi: https://pdf-markdown-app.1vittl6yfklm.us-east.codeengine.appdomain.cloud/
 ## Installation
 
 1.Clone the repository:
